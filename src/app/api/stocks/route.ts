@@ -5,10 +5,12 @@ import { marketSession } from '@/stocks/session';
 import { connectionStatus } from '@/stocks/moomoo-auth';
 import { quoteFreshness } from '@/stocks/moomoo';
 import { providerConfiguration } from '@/stocks/provider';
+import { hydrateMoomooState } from '@/stocks/moomoo-persistence';
 
 export const dynamic = 'force-dynamic';
 export async function GET() {
   const db = stockDb(); ensureMonitorJob(db);
+  await hydrateMoomooState(db);
   const storedWatchlist = listWatchlist(db) as Array<Record<string, unknown> & { quoteAt: string | null; receivedAt: string | null; provider: string | null; quality: string | null }>;
   const provider = providerConfiguration();
   const heartbeat = db.prepare("SELECT value FROM stock_meta WHERE key='worker_last_seen'").get() as { value: string } | undefined;

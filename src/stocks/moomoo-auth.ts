@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3';
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { hydrateMoomooState, persistMoomooState } from './moomoo-persistence';
 
 const API_HOST = 'https://webapi.moomoo.com';
 const ALLOWED_SCOPE = 'quote:read';
@@ -69,16 +70,19 @@ export async function ensureOAuthClient(db: Database.Database, redirectUri: stri
   if (!response.ok || typeof data.client_id !== 'string') throw new Error(`Moomoo OAuth client registration failed (${response.status}): ${String(data.error_description ?? data.error ?? 'invalid response')}`);
   const registration = typeof data.registration_access_token === 'string' ? encryptSecret(data.registration_access_token) : null;
   db.prepare(`INSERT INTO moomoo_oauth_clients(id,client_id,redirect_uri,registration_token_cipher,updated_at) VALUES(1,?,?,?,?)`).run(data.client_id, redirectUri, registration, new Date().toISOString());
+  await persistMoomooState(db);
   return { clientId: data.client_id, redirectUri };
 }
 
 export async function createAuthorization(db: Database.Database, origin: string, fetchImpl: typeof fetch = fetch) {
+  await hydrateMoomooState(db);
   const redirectUri = oauthRedirectUri(origin);
   const client = await ensureOAuthClient(db, redirectUri, fetchImpl);
   const state = randomBytes(32).toString('base64url'), verifier = randomBytes(64).toString('base64url');
   const expiresAt = new Date(Date.now() + 5 * 60_000).toISOString();
   db.prepare('DELETE FROM moomoo_oauth_sessions WHERE expires_at<? OR used_at IS NOT NULL').run(new Date().toISOString());
   db.prepare('INSERT INTO moomoo_oauth_sessions(state_hash,verifier_cipher,redirect_uri,expires_at) VALUES(?,?,?,?)').run(stateHash(state), encryptSecret(verifier), redirectUri, expiresAt);
+  await persistMoomooState(db);
   const url = new URL(`${API_HOST}/oauth2/authorize/confirm`);
   url.searchParams.set('client_id', client.clientId);
   url.searchParams.set('code_challenge', pkceChallenge(verifier));
@@ -104,9 +108,10 @@ function saveTokenResponse(db: Database.Database, data: TokenResponse, priorRefr
   const seconds = Number(data.expires_in);
   if (!Number.isFinite(seconds) || seconds <= 0) throw new Error('Moomoo token expiry is invalid');
   const now = new Date(), expiresAt = new Date(now.getTime() + seconds * 1000).toISOString();
+  const storedScope = data.scope.split(/\s+/).filter(Boolean).map(scope => scope.startsWith('accid:') ? 'accid:*' : scope).join(' ');
   db.prepare(`INSERT INTO moomoo_oauth_tokens(id,access_cipher,refresh_cipher,token_type,scope,expires_at,updated_at) VALUES(1,?,?,?,?,?,?)
     ON CONFLICT(id) DO UPDATE SET access_cipher=excluded.access_cipher,refresh_cipher=excluded.refresh_cipher,token_type=excluded.token_type,scope=excluded.scope,expires_at=excluded.expires_at,updated_at=excluded.updated_at`)
-    .run(encryptSecret(data.access_token), encryptSecret(refresh), typeof data.token_type === 'string' ? data.token_type : 'Bearer', data.scope, expiresAt, now.toISOString());
+    .run(encryptSecret(data.access_token), encryptSecret(refresh), typeof data.token_type === 'string' ? data.token_type : 'Bearer', storedScope, expiresAt, now.toISOString());
   return { scope: data.scope, expiresAt };
 }
 
@@ -120,16 +125,19 @@ async function tokenRequest(body: URLSearchParams, fetchImpl: typeof fetch) {
 export async function completeAuthorization(db: Database.Database, input: { state: string; code: string; cookieHash: string | undefined }, fetchImpl: typeof fetch = fetch) {
   const hash = stateHash(input.state);
   if (!input.cookieHash || input.cookieHash !== hash) throw new Error('Moomoo OAuth state cookie mismatch');
+  await hydrateMoomooState(db);
   const session = db.prepare('SELECT verifier_cipher AS verifierCipher,redirect_uri AS redirectUri,expires_at AS expiresAt,used_at AS usedAt FROM moomoo_oauth_sessions WHERE state_hash=?').get(hash) as { verifierCipher: string; redirectUri: string; expiresAt: string; usedAt: string | null } | undefined;
   if (!session || session.usedAt || Date.parse(session.expiresAt) < Date.now()) throw new Error('Moomoo OAuth state is missing, expired, or already used');
   const client = await ensureOAuthClient(db, session.redirectUri, fetchImpl);
   const body = new URLSearchParams({ grant_type: 'authorization_code', code: input.code, client_id: client.clientId, redirect_uri: session.redirectUri, code_verifier: decryptSecret(session.verifierCipher) });
   const result = saveTokenResponse(db, await tokenRequest(body, fetchImpl));
   db.prepare('UPDATE moomoo_oauth_sessions SET used_at=? WHERE state_hash=?').run(new Date().toISOString(), hash);
+  await persistMoomooState(db);
   return result;
 }
 
 export async function getAccessToken(db: Database.Database, fetchImpl: typeof fetch = fetch) {
+  await hydrateMoomooState(db);
   const row = db.prepare('SELECT access_cipher AS accessCipher,refresh_cipher AS refreshCipher,scope,expires_at AS expiresAt FROM moomoo_oauth_tokens WHERE id=1').get() as { accessCipher: string; refreshCipher: string; scope: string; expiresAt: string } | undefined;
   if (!row) throw new Error('Moomoo is not connected. Complete the read-only OAuth authorization first.');
   validateReadOnlyScope(row.scope);
@@ -139,6 +147,7 @@ export async function getAccessToken(db: Database.Database, fetchImpl: typeof fe
   const refresh = decryptSecret(row.refreshCipher);
   const data = await tokenRequest(new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refresh, client_id: clientId }), fetchImpl);
   saveTokenResponse(db, data, refresh);
+  await persistMoomooState(db);
   return decryptSecret((db.prepare('SELECT access_cipher AS accessCipher FROM moomoo_oauth_tokens WHERE id=1').get() as { accessCipher: string }).accessCipher);
 }
 

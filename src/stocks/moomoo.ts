@@ -3,6 +3,7 @@ import { getAccessToken } from './moomoo-auth';
 import { ProviderError } from './errors';
 import { marketSession } from './session';
 import { stockDb } from './store';
+import { persistMoomooState } from './moomoo-persistence';
 import type { DailyBar, DataFreshness, QuoteQuality, StockQuote } from './types';
 
 const API_HOST = 'https://webapi.moomoo.com';
@@ -202,7 +203,7 @@ export async function probeMoomooQuoteEntitlement(db: Database.Database = stockD
     return await new Promise<ReturnType<typeof save>>((resolve) => {
       const socket = new WebSocket('wss://webapi-quote.moomoo.com/ws');
       let settled = false, authenticated = false;
-      const finish = (status: string, evidence: string) => { if (settled) return; settled = true; clearTimeout(timer); socket.close(); resolve(save(status, evidence)); };
+      const finish = (status: string, evidence: string) => { if (settled) return; settled = true; clearTimeout(timer); socket.close(); const result = save(status, evidence); void persistMoomooState(db).then(() => resolve(result), () => resolve(result)); };
       const timer = setTimeout(() => finish('UNVERIFIED', authenticated ? 'Authenticated, but the US quote subscription did not return a conclusive result before timeout.' : 'WebSocket authentication did not complete before timeout.'), timeoutMs);
       socket.addEventListener('open', () => socket.send(JSON.stringify({ id: 'entitlement-auth', action: 'auth', data: { auth_type: 'oauth2', authorization: `Bearer ${token}` } })));
       socket.addEventListener('message', event => {
@@ -223,5 +224,5 @@ export async function probeMoomooQuoteEntitlement(db: Database.Database = stockD
       socket.addEventListener('error', () => finish('UNVERIFIED', 'Moomoo WebSocket entitlement probe failed; REST quotes remain available.'));
       socket.addEventListener('close', () => { if (!settled) finish('UNVERIFIED', 'Moomoo closed the entitlement probe before returning a subscription result.'); });
     });
-  } catch (error) { return save('UNVERIFIED', error instanceof Error ? error.message : 'Unable to probe Moomoo quote entitlement.'); }
+  } catch (error) { const result = save('UNVERIFIED', error instanceof Error ? error.message : 'Unable to probe Moomoo quote entitlement.'); await persistMoomooState(db); return result; }
 }

@@ -75,6 +75,7 @@ test('OAuth accepts Moomoo quote and account identifier bundle but uses quote:re
     const result = await completeAuthorization(db, { state, code: 'code', cookieHash: stateHash(state) }, fakeFetch);
     assert.equal(result.scope, 'quote:read quote:write accid:123 accid:456');
     assert.equal((db.prepare('SELECT COUNT(*) AS n FROM moomoo_oauth_tokens').get() as { n: number }).n, 1);
+    assert.equal((db.prepare('SELECT scope FROM moomoo_oauth_tokens WHERE id=1').get() as { scope: string }).scope, 'quote:read quote:write accid:* accid:*');
   } finally { db.close(); if (prior === undefined) delete process.env.MOOMOO_TOKEN_ENCRYPTION_KEY; else process.env.MOOMOO_TOKEN_ENCRYPTION_KEY = prior; }
 });
 

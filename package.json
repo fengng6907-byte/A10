@@ -1,0 +1,41 @@
+{
+  "name": "gold-ai-copilot",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --hostname 127.0.0.1",
+    "build": "next build",
+    "start": "next start --hostname 127.0.0.1",
+    "typecheck": "tsc --noEmit",
+    "worker": "tsx src/worker.ts",
+    "test": "tsx src/run-tests.ts",
+    "scan:financials": "tsx src/research/cli.ts financials",
+    "scan:discover": "tsx src/research/cli.ts discover",
+    "research:generate": "tsx src/research/cli.ts research",
+    "alerts:process": "tsx src/research/cli.ts alerts",
+    "briefing:daily": "tsx src/research/cli.ts briefing",
+    "moomoo:test": "tsx src/stocks/moomoo-cli.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.2.0",
+    "lucide-react": "^0.468.0",
+    "next": "^16.3.8",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "zod": "^4.1.0"
+  },
+  "overrides": {
+    "source-map-js": "^1.2.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "postcss": "^8.5.28",
+    "tailwindcss": "^4.1.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}

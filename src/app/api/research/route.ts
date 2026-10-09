@@ -1,0 +1,4 @@
+import { NextResponse } from 'next/server';
+import { dashboardData,researchDb } from '@/research/store';
+export const dynamic='force-dynamic';
+export async function GET(){return NextResponse.json(dashboardData(researchDb()));}

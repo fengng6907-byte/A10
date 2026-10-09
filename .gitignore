@@ -1,0 +1,8 @@
+node_modules
+.next
+.env.local
+data/*.db
+data/*.db-*
+data/.moomoo-token-key
+*.tsbuildinfo
+.npm-cache

@@ -1,0 +1,29 @@
+import { createHash } from 'node:crypto';
+import type Database from 'better-sqlite3';
+import { createNotification } from './notifications';
+
+type Insight={text:string;sources:{id?:number;title:string;url:string}[]};
+export type DailyBriefing={date:string;generatedAt:string;sessionSummary:Insight[];watchlistDevelopments:Insight[];priceChanges:Insight[];qualityDiscoveries:Insight[];growthDiscoveries:Insight[];financialChanges:Insight[];upcomingEvents:Insight[];risks:Insight[];priorityResearch:Insight[];noMeaningfulDiscoveries:boolean};
+const sgDate=(d:Date)=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Singapore',year:'numeric',month:'2-digit',day:'2-digit'}).format(d);
+const sourceRows=(db:Database.Database,ids:number[])=>ids.length?db.prepare(`SELECT id,title,url FROM research_sources WHERE id IN (${ids.map(()=>'?').join(',')})`).all(...ids) as {id:number;title:string;url:string}[]:[];
+
+export function buildDailyBriefing(db:Database.Database,now=new Date()):DailyBriefing{
+  const generatedAt=now.toISOString(),date=sgDate(now);
+  const watch=db.prepare(`SELECT c.ticker,c.name,q.price,q.previous_close AS previousClose,q.quote_at AS quoteAt,q.source_url AS sourceUrl FROM stock_watchlist w JOIN stock_companies c ON c.id=w.company_id LEFT JOIN stock_quotes q ON q.id=(SELECT id FROM stock_quotes WHERE company_id=c.id ORDER BY quote_at DESC,id DESC LIMIT 1) ORDER BY c.ticker`).all() as any[];
+  const priceChanges:Insight[]=watch.filter(x=>x.price!=null&&x.previousClose).map(x=>({text:`${x.ticker} ${(100*(x.price-x.previousClose)/x.previousClose).toFixed(1)}% versus its prior close, last observed at ${x.quoteAt}.`,sources:[{title:`${x.ticker} quote source`,url:x.sourceUrl}]}));
+  const discovery=(category:string)=>{const rows=db.prepare(`SELECT s.*,c.ticker FROM research_screenings s JOIN stock_companies c ON c.id=s.company_id WHERE s.is_current=1 AND s.category=? AND s.evaluated_at>=? AND s.completeness>=60 ORDER BY COALESCE(s.quality_score,s.growth_score) DESC LIMIT 10`).all(category,new Date(now.getTime()-48*3600000).toISOString()) as any[];return rows.map(x=>{const ids=[...new Set((JSON.parse(x.components_json) as any).quality.flatMap((c:any)=>c.evidenceIds??[]))] as number[];return{text:`${x.ticker} qualifies with quality ${x.quality_score??'unavailable'}, growth ${x.growth_score??'unavailable'} and ${Number(x.completeness).toFixed(0)}% completeness.`,sources:sourceRows(db,ids)};});};
+  const quality=discovery('QUALITY_COMPOUNDER'),growth=discovery('EMERGING_GROWTH');
+  const changes=db.prepare(`SELECT f.*,c.ticker FROM research_financial_changes f JOIN stock_companies c ON c.id=f.company_id WHERE f.detected_at>=? AND f.materiality IN ('MEDIUM','HIGH') ORDER BY CASE f.materiality WHEN 'HIGH' THEN 0 ELSE 1 END,f.detected_at DESC LIMIT 15`).all(new Date(now.getTime()-48*3600000).toISOString()) as any[];
+  const financialChanges=changes.map(x=>({text:`${x.ticker} ${x.metric.replaceAll('_',' ')} is ${x.direction.toLowerCase()} (${x.comparison}${x.percent_change==null?'':`, ${(x.percent_change*100).toFixed(1)}%`}).`,sources:sourceRows(db,JSON.parse(x.evidence_ids_json))}));
+  const risks=(db.prepare(`SELECT n.title,n.why_it_matters AS why,n.evidence_ids_json FROM research_notifications n WHERE n.priority IN ('CRITICAL','HIGH') AND n.created_at>=? ORDER BY CASE n.priority WHEN 'CRITICAL' THEN 0 ELSE 1 END,n.created_at DESC LIMIT 10`).all(new Date(now.getTime()-48*3600000).toISOString()) as any[]).map(x=>({text:`${x.title}: ${x.why}`,sources:sourceRows(db,JSON.parse(x.evidence_ids_json))}));
+  const priorityResearch=risks.slice(0,3);
+  const announcements=(db.prepare(`SELECT s.id,s.title,s.url,c.ticker,a.event_type FROM research_announcements a JOIN research_sources s ON s.id=a.source_id LEFT JOIN stock_companies c ON c.id=a.company_id WHERE s.published_at>=? AND a.materiality IN ('MEDIUM','HIGH') ORDER BY s.published_at DESC LIMIT 10`).all(new Date(now.getTime()-48*3600000).toISOString()) as any[]).map(x=>({text:`${x.ticker??'Market'}: ${x.title}`,sources:[{id:x.id,title:x.title,url:x.url}]}));
+  return {date,generatedAt,sessionSummary:priceChanges.length?[{text:`Latest stored quotes cover ${priceChanges.length} watched companies. Provider timestamps are shown per item.`,sources:priceChanges.flatMap(x=>x.sources).slice(0,5)}]:[{text:'No verified quote data is available for a previous-session summary.',sources:[]}],watchlistDevelopments:announcements,priceChanges,qualityDiscoveries:quality,growthDiscoveries:growth,financialChanges,upcomingEvents:[{text:'No verified future company events were collected; filing dates and announcements are historical until a calendar source is configured.',sources:[]}],risks,priorityResearch,noMeaningfulDiscoveries:quality.length===0&&growth.length===0};
+}
+
+export function generateDailyBriefing(db:Database.Database,now=new Date()){
+  const briefing=buildDailyBriefing(db,now),json=JSON.stringify(briefing),hash=createHash('sha256').update(json).digest('hex');
+  db.prepare(`INSERT INTO research_briefings(briefing_date_sg,input_hash,status,briefing_json,generated_at) VALUES(?,?,'DONE',?,?) ON CONFLICT(briefing_date_sg) DO UPDATE SET input_hash=excluded.input_hash,status='DONE',briefing_json=excluded.briefing_json,generated_at=excluded.generated_at`).run(briefing.date,hash,json,briefing.generatedAt);
+  createNotification(db,{category:'DAILY_INVESTMENT_BRIEF_READY',priority:'LOW',eventAt:briefing.generatedAt,title:`Daily investment brief — ${briefing.date}`,whyItMatters:briefing.noMeaningfulDiscoveries?'No meaningful new stock discoveries were found; other watchlist and risk updates are summarized.':'New discoveries or research changes are ready for review.',risks:'The briefing reflects collected data through its displayed cutoff and may be incomplete.',evidenceIds:[],targetUrl:'/stocks/research',dedupeKey:briefing.date,groupKey:'daily-brief'},now);
+  return briefing;
+}
